@@ -137,14 +137,13 @@ class RLAlgo():
 
             infos["Running_Average_Rewards"] = np.mean(self.episode_rewards)
             infos["Train_Epoch_Reward"] = training_epoch_info["train_epoch_reward"]
-            infos["Running_Training_Average_Rewards"] = np.mean(
-                self.training_episode_rewards)
+            infos["Running_Training_Average_Rewards"] = np.mean(self.training_episode_rewards)
             infos["Explore_Time"] = explore_time
             infos["Train___Time"] = train_time
             infos["Eval____Time"] = eval_time
             infos.update(eval_infos)
             infos.update(finish_epoch_info)
-
+            # print(infos)
             self.logger.add_epoch_info(epoch, total_frames,
                 time.time() - start, infos )
 

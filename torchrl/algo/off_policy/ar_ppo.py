@@ -8,16 +8,15 @@ from torch import nn as nn
 
 from .off_rl_algo import OffRLAlgo
 
-class ARSAC(OffRLAlgo):
+class ARPPO(OffRLAlgo):
     """
-    SAC for Action Representation
+    PPO for Action Representation
     """
 
     def __init__(
         self,
-        pf_state,pf_task,pf_action,
-        qf1, qf2,
-        plr, qlr,
+        pf_state,pf_action,
+        plr,
         task_nums = 1,
         optimizer_class=optim.Adam,
 
@@ -29,47 +28,21 @@ class ARSAC(OffRLAlgo):
         target_entropy=None,
         **kwargs
     ):
-        super(ARSAC,self).__init__(**kwargs)
+        super(ARPPO,self).__init__(**kwargs)
         self.pf_state=pf_state
-        self.pf_task=pf_task
         self.pf_action=pf_action
-        self.qf1=qf1
-        self.qf2=qf2
-
-        self.target_qf1 = copy.deepcopy(qf1)
-        self.target_qf2 = copy.deepcopy(qf2)
 
         self.to(self.device)
 
         self.plr = plr
-        self.qlr = qlr
 
         self.optimizer_class = optimizer_class
-
-        self.qf1_optimizer = optimizer_class(
-            self.qf1.parameters(),
-            lr=self.qlr,
-        )
-
-        self.qf2_optimizer = optimizer_class(
-            self.qf2.parameters(),
-            lr=self.qlr,
-        )
-
-        self.pf_state_optimizer = optimizer_class(
-            self.pf_state.parameters(),
-            lr=self.plr,
-        )
 
         self.pf_task_optimizer = optimizer_class(
             self.pf_task.parameters(),
             lr=self.plr,
         )
 
-        self.pf_action_optimizer = optimizer_class(
-            self.pf_action.parameters(),
-            lr=self.plr,
-        )
 
 
         self.automatic_entropy_tuning = automatic_entropy_tuning
@@ -113,8 +86,6 @@ class ARSAC(OffRLAlgo):
             self.pf_state.train()
             self.pf_task.train()
             self.pf_action.train()
-            self.qf1.train()
-            self.qf2.train()
 
             """
             Policy operations.
@@ -157,20 +128,7 @@ class ARSAC(OffRLAlgo):
                 target_q2_pred = self.target_qf2([next_obs, target_actions,task_inputs])
                 min_target_q = torch.min(target_q1_pred, target_q2_pred)
                 target_v_values = min_target_q - alpha * target_log_probs
-            """
-            QF Loss
-            """
-            q_target = rewards + (1. - terminals) * self.discount * target_v_values
-            qf1_loss = self.qf_criterion(q1_pred, q_target.detach())
-            qf2_loss = self.qf_criterion(q2_pred, q_target.detach())
-            assert q1_pred.shape == q_target.shape
-            assert q2_pred.shape == q_target.shape
-            # qf1_loss = (0.5 * ( q1_pred - q_target.detach() ) ** 2).mean()
-            # qf2_loss = (0.5 * ( q2_pred - q_target.detach() ) ** 2).mean()
-
-            q_new_actions = torch.min(
-                self.qf1([obs, new_actions,task_inputs]),
-                self.qf2([obs, new_actions,task_inputs]))
+            
             """
             Policy Loss
             """
@@ -216,18 +174,14 @@ class ARSAC(OffRLAlgo):
             info = {}
             info['Reward_Mean'] = rewards.mean().item()
 
-            if self.automatic_entropy_tuning:
-                info["Alpha"] = alpha.item()
-                info["Alpha_loss"] = alpha_loss.item()
-            info['Training/policy_loss'] = policy_loss.item()
-            info['Training/qf1_loss'] = qf1_loss.item()
-            info['Training/qf2_loss'] = qf2_loss.item()
 
-            info['Training/pf_state_norm'] = pf_state_norm.item()
+            info['Training/policy_loss'] = policy_loss.item()
+
+
+
             info['Training/pf_task_norm'] = pf_task_norm.item()
-            info['Training/pf_action_norm'] = pf_action_norm.item()
-            info['Training/qf1_norm'] = qf1_norm.item()
-            info['Training/qf2_norm'] = qf2_norm.item()
+ 
+
 
             info['log_std/mean'] = log_std.mean().item()
             info['log_std/std'] = log_std.std().item()
@@ -250,27 +204,13 @@ class ARSAC(OffRLAlgo):
     def networks(self):
         return [
             self.pf_state,
-            self.pf_task,
             self.pf_action,
-            self.qf1,
-            self.qf2,
-            self.target_qf1,
-            self.target_qf2
         ]
         
     @property
     def snapshot_networks(self):
         return [
             ["pf_state", self.pf_state],
-            ["pf_task", self.pf_task],
-            ["pf_action", self.pf_action],
-            ["qf1", self.qf1],
-            ["qf2", self.qf2],
+            ["pf_action", self.pf_action]
         ]
 
-    @property
-    def target_networks(self):
-        return [
-            ( self.qf1, self.target_qf1 ),
-            ( self.qf2, self.target_qf2 )
-        ]

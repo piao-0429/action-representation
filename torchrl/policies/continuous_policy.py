@@ -279,9 +279,6 @@ class EmbeddingDetContPolicyBase:
             "action":torch.tanh(
                 self.forward(x, embedding_input)).squeeze(0)}
 
-
-
-
 class MultiHeadGuassianContPolicy(networks.BootstrappedNet):
     def forward(self, x, idx):
         x = super().forward(x, idx)
@@ -330,25 +327,28 @@ class MultiHeadGuassianContPolicy(networks.BootstrappedNet):
         return dic
 
 
-class ActionRepresentationGuassianContPolicy_v1(networks.EmbeddingNet_v1):
+class ActionRepresentationGuassianContPolicy(networks.Net):
     
-    def forward(self, x, task_input):
-        x, embed = super().forward(x, task_input)
+    def forward(self, representation, embedding):
+        x = torch.cat([representation, embedding], dim=-1)
+        x = super().forward(x)
         mean, log_std = x.chunk(2, dim=-1)
 
         log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
         std = torch.exp(log_std)
 
-        return mean, std, log_std, embed
+        return mean, std, log_std
 
-    def eval_act(self, x, task_input):
+    def eval_act(self, representation, embedding):
         with torch.no_grad():
-            mean, _, _, _ = self.forward(x, task_input)
+            mean, _, _ = self.forward(representation, embedding)
             
         return torch.tanh(mean.squeeze(0)).detach().cpu().numpy()
 
-    def explore(self, x, task_input, return_log_probs = False, return_pre_tanh = False):
-        mean, std, log_std, embed = self.forward(x, task_input)
+    def explore(self, representation, embedding, return_log_probs = False, return_pre_tanh = False):
+        
+        
+        mean, std, log_std = self.forward(representation, embedding)
 
         dis = TanhNormal(mean, std)
 
@@ -358,111 +358,7 @@ class ActionRepresentationGuassianContPolicy_v1(networks.EmbeddingNet_v1):
             "mean": mean,
             "log_std": log_std,
             "ent": ent,
-            "embed":embed
-        }
-
-        if return_log_probs:
-            action, z = dis.rsample(return_pretanh_value=True)
-            log_prob = dis.log_prob(
-                action,
-                pre_tanh_value=z
-            )
-            log_prob = log_prob.sum(dim=-1, keepdim=True)
-            dic["pre_tanh"] = z.squeeze(0)
-            dic["log_prob"] = log_prob
-        else:
-            if return_pre_tanh:
-                action, z = dis.rsample(return_pretanh_value=True)
-                dic["pre_tanh"] = z.squeeze(0)
-            action = dis.rsample(return_pretanh_value=False)
-
-        dic["action"] = action.squeeze(0)
-
-
-        return dic
-
-
-# class ActionRepresentationGuassianContPolicy_v2(networks.EmbeddingNet_v2):
-    
-#     def forward(self, x, embedding_input):
-#         x = super().forward(x, embedding_input)
-#         mean, log_std = x.chunk(2, dim=-1)
-
-#         log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
-#         std = torch.exp(log_std)
-
-#         return mean, std, log_std
-
-#     def eval_act(self, x, embedding_input):
-#         with torch.no_grad():
-#             mean, _, _= self.forward(x, embedding_input)
             
-#         return torch.tanh(mean.squeeze(0)).detach().cpu().numpy()
-
-#     def explore(self, x, embedding_input, return_log_probs = False, return_pre_tanh = False):
-#         mean, std, log_std = self.forward(x, embedding_input)
-
-#         dis = TanhNormal(mean, std)
-
-#         ent = dis.entropy().sum(-1, keepdim=True)
-
-#         dic = {
-#             "mean": mean,
-#             "log_std": log_std,
-#             "ent": ent,
-#             "embed":embedding_input
-#         }
-
-#         if return_log_probs:
-#             action, z = dis.rsample(return_pretanh_value=True)
-#             log_prob = dis.log_prob(
-#                 action,
-#                 pre_tanh_value=z
-#             )
-#             log_prob = log_prob.sum(dim=-1, keepdim=True)
-#             dic["pre_tanh"] = z.squeeze(0)
-#             dic["log_prob"] = log_prob
-#         else:
-#             if return_pre_tanh:
-#                 action, z = dis.rsample(return_pretanh_value=True)
-#                 dic["pre_tanh"] = z.squeeze(0)
-#             action = dis.rsample(return_pretanh_value=False)
-
-#         dic["action"] = action.squeeze(0)
-
-
-#         return dic
-
-
-class ActionRepresentationGuassianContPolicy_v2(networks.EmbeddingNet_v2):
-    
-    def forward(self, x, task_input):
-        x, embed = super().forward(x, task_input)
-        mean, log_std = x.chunk(2, dim=-1)
-
-        log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
-        std = torch.exp(log_std)
-
-        return mean, std, log_std, embed
-
-    def eval_act(self, x, task_input):
-        with torch.no_grad():
-            mean, _, _, _ = self.forward(x, task_input)
-            
-        return torch.tanh(mean.squeeze(0)).detach().cpu().numpy()
-
-    def explore(self, x, task_input, return_log_probs = False, return_pre_tanh = False):
-        mean, std, log_std, embed = self.forward(x, task_input)
-
-        dis = TanhNormal(mean, std)
-
-        ent = dis.entropy().sum(-1, keepdim=True)
-
-        dic = {
-            "mean": mean,
-            "log_std": log_std,
-            "ent": ent,
-            "embed":embed
         }
 
         if return_log_probs:

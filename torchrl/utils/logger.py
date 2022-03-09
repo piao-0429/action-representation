@@ -79,7 +79,6 @@ class Logger():
         method_list = [ np.mean, np.std, np.max, np.min ]
         name_list = [ "Mean", "Std", "Max", "Min" ]
         tabulate_list.append( ["Name"] + name_list )
-
         for info in self.stored_infos:
 
             temp_list = [info]

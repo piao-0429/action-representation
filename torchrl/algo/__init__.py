@@ -8,4 +8,6 @@ __all__ = [
     'TwinSAC',
     'TwinSACQ',
     'TD3',
+    'ARSAC',
+    'ARPPO'
 ]
