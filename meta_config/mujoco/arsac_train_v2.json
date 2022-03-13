@@ -5,15 +5,25 @@
         "size": 1e6
     },
 
-    "representation_shape":32,
+    "representation_shape":16,
 
-    "embedding_shape":32,
+    "embedding_shape":16,
 
     "cat_state_task": false,
 
-    "p_task_net":{
-        "hidden_shapes": [400],
+    "p_state_net":{
+        "hidden_shapes": [400,400],
         "append_hidden_shapes": []
+    },
+
+    "p_action_net":{
+        "hidden_shapes": [400,400],
+        "append_hidden_shapes": [400,400]
+    },
+
+    "q_net":{
+        "hidden_shapes": [400,400],
+        "append_hidden_shapes": [400,400]
     },
 
     "general_setting": {

@@ -871,3 +871,372 @@ class AsyncMultiTaskParallelCollectorForActionRepresentation(AsyncSingleTaskPara
             "pf_action": self.pf[2]
         }
     
+
+
+
+class AsyncMultiTaskParallelCollectorForActionRepresentation_v2(AsyncSingleTaskParallelCollector):
+
+    def __init__(self, embedding, progress_alpha=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.tasks=self.task_list
+        self.tasks_mapping = {}
+        for idx, task_name in enumerate(self.tasks):
+            self.tasks_mapping[task_name] = idx
+        self.tasks_progress = [0 for _ in range(len(self.tasks))]
+        self.progress_alpha = progress_alpha
+        self.pf_state=self.pf[0]
+        self.pf_action=self.pf[1]
+        self.embedding = embedding
+
+    @classmethod
+    def take_actions(cls, funcs, embedding, env_info, ob_info, replay_buffer):
+
+        pf_state = funcs["pf_state"]
+        pf_action = funcs["pf_action"]
+        ob = ob_info["ob"]
+        task_idx = env_info.task_rank
+        
+
+        pf_state.eval()
+        pf_action.eval()
+
+        with torch.no_grad():
+        
+            idx_input = torch.Tensor([[task_idx]]).to(env_info.device).long()
+            task_input = torch.zeros(env_info.num_tasks)
+            task_input[env_info.task_rank] = 1
+            task_input = task_input.to(env_info.device).unsqueeze(0)
+            ob = torch.Tensor( ob ).to(env_info.device).unsqueeze(0)
+            representation = pf_state.forward(ob)
+
+            out = pf_action.explore(representation, embedding)
+            
+            act = out["action"]
+            # act = act[0]
+            
+
+
+        act = act.detach().cpu().numpy()
+        if not env_info.continuous:
+            act = act[0]
+        
+        if type(act) is not int:
+            if np.isnan(act).any():
+                print("NaN detected. BOOM")
+                exit()
+
+        next_ob, rewards, done, info = env_info.env.step(act)
+        reward=rewards[task_idx]
+        if env_info.train_render:
+            env_info.env.render()
+        env_info.current_step += 1
+
+        sample_dict = {
+            "obs": ob,
+            "next_obs": next_ob,
+            "acts": act,
+            "task_idxs": [env_info.task_rank],
+            "rewards": [reward],
+            "terminals": [done],
+            "task_inputs": task_input.cpu().numpy(),
+            "embeddings": embedding.cpu().numpy()
+        }
+       
+
+        if done or env_info.current_step >= env_info.max_episode_frames:
+            next_ob = env_info.env.reset()
+            env_info.finish_episode()
+            env_info.start_episode() # reset current_step
+
+        replay_buffer.add_sample( sample_dict, env_info.task_rank)
+
+        return next_ob, done, reward, info
+
+    @staticmethod
+    def train_worker_process(cls, shared_funcs, embedding, env_info,
+        replay_buffer, shared_que,
+        start_barrier, epochs, start_epoch, task_name, shared_dict):
+
+        replay_buffer.rebuild_from_tag()
+        local_funcs = copy.deepcopy(shared_funcs)
+        local_embedding = copy.deepcopy(embedding)
+        for key in local_funcs:
+            local_funcs[key].to(env_info.device)
+        local_embedding.to(env_info.device)
+        c_ob = {
+            "ob": env_info.env.reset()
+        }
+        train_rew = 0
+        current_epoch = 0
+        while True:
+            start_barrier.wait()
+            current_epoch += 1
+            if current_epoch < start_epoch:
+                shared_que.put({
+                    'train_rewards': None,
+                    'train_epoch_reward': None
+                })
+                continue
+            if current_epoch > epochs:
+                break
+
+            for key in shared_funcs:
+                local_funcs[key].load_state_dict(shared_funcs[key].state_dict())
+            local_embedding = embedding
+            train_rews = []
+            train_epoch_reward = 0    
+
+            for t in range(env_info.epoch_frames):
+
+                next_ob, done, reward, info = cls.take_actions(local_funcs, local_embedding, env_info, c_ob, replay_buffer )
+                c_ob["ob"] = next_ob
+                train_rew += reward
+                train_epoch_reward += reward
+                train_rews.append(train_rew)
+                train_rew = 0
+                # if done:
+                #     train_rews.append(train_rew)
+                #     train_rew = 0
+
+            # if norm_obs_flag:
+            #     shared_dict[task_name] = {
+            #         "obs_mean": env_info.env._obs_mean,
+            #         "obs_var": env_info.env._obs_var
+            #     }
+                # print("Put", task_name)
+            
+            shared_que.put({
+                'train_rewards':train_rews,
+                'train_epoch_reward':train_epoch_reward
+            })
+
+    @staticmethod
+    def eval_worker_process(shared_pf_state,shared_pf_action, shared_embedding,
+        env_info, shared_que, start_barrier, epochs, start_epoch, task_name, shared_dict):
+
+        pf_state = copy.deepcopy(shared_pf_state).to(env_info.device)
+        pf_action = copy.deepcopy(shared_pf_action).to(env_info.device)
+        embedding = copy.deepcopy(shared_embedding).to(env_info.device)
+        # # Rebuild Env
+        # env_info.env = env_info.env_cls(**env_info.env_args)
+
+        # norm_obs_flag = env_info.env_args["env_params"]["obs_norm"]
+
+        # env_info.env.eval()
+        # env_info.env._reward_scale = 1
+        current_epoch = 0
+        while True:
+            start_barrier.wait()
+            current_epoch += 1
+            if current_epoch < start_epoch:
+                shared_que.put({
+                    'eval_rewards': None,
+                    'task_name': task_name
+                })
+                continue
+            if current_epoch > epochs:
+                break
+            pf_state.load_state_dict(shared_pf_state.state_dict())
+            pf_action.load_state_dict(shared_pf_action.state_dict())
+            pf_state.eval()
+            pf_action.eval()
+            # print("Get", task_name)
+            # if norm_obs_flag:
+            #     env_info.env._obs_mean = shared_dict[task_name]["obs_mean"]
+            #     env_info.env._obs_var = shared_dict[task_name]["obs_var"]
+                # print(env_info.env._obs_mean)
+                #  = {
+                #     "obs_mean": env_info.env._obs_mean,
+                #     "obs_var": env_info.env._obs_var
+                # }
+
+            eval_rews = []  
+
+            done = False
+          
+            for idx in range(env_info.eval_episodes):
+
+                eval_ob = env_info.env.reset()
+                rew = 0
+
+                task_idx = env_info.task_rank
+                
+                while not done:
+               
+                  
+                  
+                    # embedding_input = torch.zeros(env_info.num_tasks)
+                    task_input = torch.zeros(env_info.num_tasks)
+                    task_input[env_info.task_rank] = 1
+                    task_input = task_input.unsqueeze(0).to(env_info.device)
+                    eval_ob =  torch.Tensor( eval_ob ).to(env_info.device).unsqueeze(0)
+                    representation = pf_state.forward(eval_ob)
+                    act = pf_action.eval_act(representation, embedding)
+                    eval_ob, rs, done, info = env_info.env.step( act )
+                    r=rs[task_idx]
+                    rew += r
+                    if env_info.eval_render:
+                        env_info.env.render()
+                   
+
+                eval_rews.append(rew)
+                done = False
+      
+            shared_que.put({
+                'eval_rewards': eval_rews,
+             
+                'task_name': task_name
+            })
+
+    def start_worker(self):
+        self.workers = []
+        self.shared_que = self.manager.Queue(self.worker_nums)
+        self.start_barrier = mp.Barrier(self.worker_nums)
+                
+        self.eval_workers = []
+        self.eval_shared_que = self.manager.Queue(self.eval_worker_nums)
+        self.eval_start_barrier = mp.Barrier(self.eval_worker_nums)
+
+
+        self.shared_dict = self.manager.dict()
+
+        
+
+        assert self.worker_nums == len(self.task_list)
+
+        self.env_info.env = self.env
+       
+        
+        self.env_info.num_tasks = len(self.task_list)
+       
+        single_mt_env_args = {
+            "task_name": None,
+            "task_rank": 0,
+            "num_tasks": len(self.task_list),
+            "max_obs_dim": np.prod(self.env.observation_space.shape),
+        }
+        
+      
+        tasks=self.task_list
+        for i, task in enumerate(tasks):
+          
+            
+            self.env_info.task_rank = i
+            
+            self.env_info.env_args = single_mt_env_args
+            self.env_info.env_args["task_name"] = task
+
+            
+            start_epoch = 0
+            self.env_info.env_args["task_rank"] = i
+            p = mp.Process(
+                target=self.__class__.train_worker_process,
+                args=( self.__class__, self.shared_funcs, self.embedding,
+                    self.env_info, self.replay_buffer, 
+                    self.shared_que, self.start_barrier,
+                    self.train_epochs, start_epoch, task, self.shared_dict))
+            p.start()
+            self.workers.append(p)
+            # i += 1
+
+
+
+        assert self.eval_worker_nums == len(self.task_list)
+      
+        self.env_info.env = self.env
+        self.env_info.num_tasks = len(self.task_list)
+       
+        single_mt_env_args = {
+            "task_name": None,
+            "task_rank": 0,
+            "num_tasks": len(self.task_list),
+            "max_obs_dim": np.prod(self.env.observation_space.shape),
+        }
+
+        for i, task in enumerate(tasks):
+           
+
+            self.env_info.task_rank = i
+
+            self.env_info.env_args = single_mt_env_args
+            self.env_info.env_args["task_name"] = task
+
+            start_epoch = 0
+  
+
+            self.env_info.env_args["task_rank"] = i
+            eval_p = mp.Process(
+                target=self.__class__.eval_worker_process,
+                args=(self.shared_funcs["pf_state"],self.shared_funcs["pf_action"],self.embedding,
+                    self.env_info, self.eval_shared_que, self.eval_start_barrier,
+                    self.eval_epochs, start_epoch, task, self.shared_dict))
+            eval_p.start()
+            self.eval_workers.append(eval_p)
+
+
+    def eval_one_epoch(self):
+        
+        eval_rews = []
+      
+        self.shared_funcs["pf_state"].load_state_dict(self.funcs["pf_state"].state_dict())
+        self.shared_funcs["pf_action"].load_state_dict(self.funcs["pf_action"].state_dict())
+        tasks_result = []
+
+        active_task_counts = 0
+        for _ in range(self.eval_worker_nums):
+            worker_rst = self.eval_shared_que.get()
+            if worker_rst["eval_rewards"] is not None:
+                active_task_counts += 1
+                eval_rews += worker_rst["eval_rewards"]
+                tasks_result.append((worker_rst["task_name"], 
+                np.mean(worker_rst["eval_rewards"])))
+
+        tasks_result.sort()
+
+        dic = OrderedDict()
+        for task_name, eval_rewards in tasks_result:
+            
+            dic[task_name+"_eval_rewards"] = eval_rewards
+            self.tasks_progress[self.tasks_mapping[task_name]] *= \
+                (1 - self.progress_alpha)
+
+        dic['eval_rewards']      = eval_rews
+        
+
+        return dic
+
+
+    def train_one_epoch(self):
+        train_rews = []
+        train_epoch_reward = 0
+
+        for key in self.shared_funcs:
+            self.shared_funcs[key].load_state_dict(self.funcs[key].state_dict())
+        
+        active_worker_nums = 0
+        for _ in range(self.worker_nums):
+            worker_rst = self.shared_que.get()
+            
+            if worker_rst["train_rewards"] is not None:
+                
+                train_rews += worker_rst["train_rewards"]
+                train_epoch_reward += worker_rst["train_epoch_reward"]
+                active_worker_nums += 1
+        self.active_worker_nums = active_worker_nums
+     
+        return {
+            'train_rewards':train_rews,
+            'train_epoch_reward':train_epoch_reward
+        }
+
+
+    def to(self, device):
+        for func in self.funcs:
+            self.funcs[func].to(device)
+            
+    @property
+    def funcs(self):
+        return {
+            "pf_state": self.pf[0],
+            "pf_action": self.pf[1]
+        }

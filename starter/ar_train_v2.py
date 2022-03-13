@@ -1,10 +1,11 @@
 import sys
 
-from torchrl.algo.off_policy.ar_ppo import ARPPO
+
+
 sys.path.append(".") 
 
 import torch
-
+from torch.autograd import Variable
 import os
 import time
 import os.path as osp
@@ -22,13 +23,13 @@ params = get_params(args.config)
 
 import torchrl.policies as policies
 import torchrl.networks as networks
-from torchrl.algo import ARPPO
-
+from torchrl.algo.off_policy.ar_sac import ARSAC
+from torchrl.algo.off_policy.ar_sac_v2 import ARSAC_v2
 from torchrl.collector.para import ParallelCollector
 from torchrl.collector.para import AsyncParallelCollector
 from torchrl.collector.para.mt import SingleTaskParallelCollectorBase
 from torchrl.collector.para.async_mt import AsyncSingleTaskParallelCollector
-from torchrl.collector.para.async_mt import AsyncMultiTaskParallelCollectorUniform
+from torchrl.collector.para.async_mt import AsyncMultiTaskParallelCollectorForActionRepresentation_v2
 
 from torchrl.replay_buffers.shared import SharedBaseReplayBuffer
 from torchrl.replay_buffers.shared import AsyncSharedReplayBuffer
@@ -42,7 +43,7 @@ def experiment(args):
     device = torch.device("cuda:{}".format(args.device) if args.cuda else "cpu")
     env=gym.make(params['env_name'])
     # task_list=["forward_5","forward_6","forward_7","forward_8","forward_9","forward_10"]
-    task_list=["forward_1","forward_2","forward_3","forward_4","forward_5","forward_6","forward_7","forward_8","forward_9","forward_10"]
+    task_list=["forward_2.5_v2","forward_3.5_v2"]
     task_num=len(task_list)
     representation_shape= params['representation_shape']
     embedding_shape=params['embedding_shape']
@@ -67,7 +68,6 @@ def experiment(args):
     params['general_setting']['device'] = device
 
     params['p_state_net']['base_type']=networks.MLPBase
-    params['p_task_net']['base_type']=networks.MLPBase
     params['p_action_net']['base_type']=networks.MLPBase
     params['q_net']['base_type']=networks.MLPBase
 
@@ -80,11 +80,8 @@ def experiment(args):
         **params['p_state_net']
     )
 
-    pf_task=networks.Net(
-        input_shape=task_num, 
-        output_shape=representation_shape,
-        **params['p_task_net']
-    )
+    embedding = Variable(torch.normal(mean = torch.zeros(embedding_shape,task_num), std = 0.1).to(device),  requires_grad = True)
+
 
     pf_action=policies.ActionRepresentationGuassianContPolicy(
         input_shape = representation_shape + embedding_shape,
@@ -103,12 +100,6 @@ def experiment(args):
     model_dir = "log/"+experiment_name+"/"+params['env_name']+"/"+str(args.seed)+"/model/"
     pf_state.load_state_dict(torch.load(model_dir+"model_pf_state_best.pth", map_location='cpu'))
     pf_action.load_state_dict(torch.load(model_dir+"model_pf_action_best.pth", map_location='cpu'))
-    qf1.load_state_dict(torch.load(model_dir+"model_qf1_best.pth", map_location='cpu'))
-    qf2.load_state_dict(torch.load(model_dir+"model_qf2_best.pth", map_location='cpu'))
-
-
-
-
 
     example_ob = env.reset()
     example_dict = { 
@@ -118,7 +109,8 @@ def experiment(args):
         "rewards": [0],
         "terminals": [False],
         "task_idxs": [0],
-        "task_inputs": np.zeros(task_num)
+        "task_inputs": np.zeros(task_num),
+        "embeddings":np.zeros(embedding_shape)
     }
     
     replay_buffer = AsyncSharedReplayBuffer( int(buffer_param['size']),
@@ -131,8 +123,8 @@ def experiment(args):
     epochs = params['general_setting']['pretrain_epochs'] + \
         params['general_setting']['num_epochs']
 
-    params['general_setting']['collector'] = AsyncMultiTaskParallelCollectorUniform(
-        env=env, pf=pf, replay_buffer=replay_buffer,
+    params['general_setting']['collector'] = AsyncMultiTaskParallelCollectorForActionRepresentation_v2(
+        env=env, pf=[pf_state,pf_action], embedding = embedding, replay_buffer=replay_buffer,
         task_list=task_list,
         task_args={},
         device=device,
@@ -145,8 +137,10 @@ def experiment(args):
     )
     params['general_setting']['batch_size'] = int(params['general_setting']['batch_size'])
     params['general_setting']['save_dir'] = osp.join(logger.work_dir,"model")
-    agent = ARPPO(
-        pf = pf,
+    agent = ARSAC_v2(
+        pf_state = pf_state,
+        pf_action = pf_action,
+        embedding = embedding,
         qf1 = qf1,
         qf2 = qf2,
         task_nums=len(task_list),

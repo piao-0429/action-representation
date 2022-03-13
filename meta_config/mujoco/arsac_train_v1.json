@@ -5,9 +5,9 @@
         "size": 1e6
     },
 
-    "representation_shape":32,
+    "representation_shape":16,
 
-    "embedding_shape":32,
+    "embedding_shape":16,
 
     "cat_state_task": false,
 

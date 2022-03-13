@@ -8,15 +8,17 @@ from torch import nn as nn
 
 from .off_rl_algo import OffRLAlgo
 
-class ARPPO(OffRLAlgo):
+class ARSAC_v2(OffRLAlgo):
     """
-    PPO for Action Representation
+    SAC v2 for Action Representation
     """
 
     def __init__(
         self,
         pf_state,pf_action,
-        plr,
+        embedding,
+        qf1, qf2,
+        plr, qlr,
         task_nums = 1,
         optimizer_class=optim.Adam,
 
@@ -28,21 +30,37 @@ class ARPPO(OffRLAlgo):
         target_entropy=None,
         **kwargs
     ):
-        super(ARPPO,self).__init__(**kwargs)
+        super(ARSAC_v2,self).__init__(**kwargs)
         self.pf_state=pf_state
         self.pf_action=pf_action
+        self.embedding = embedding
+        self.qf1=qf1
+        self.qf2=qf2
+
+        self.target_qf1 = copy.deepcopy(qf1)
+        self.target_qf2 = copy.deepcopy(qf2)
 
         self.to(self.device)
 
         self.plr = plr
+        self.qlr = qlr
 
         self.optimizer_class = optimizer_class
 
-        self.pf_task_optimizer = optimizer_class(
-            self.pf_task.parameters(),
-            lr=self.plr,
+        self.qf1_optimizer = optimizer_class(
+            self.qf1.parameters(),
+            lr=self.qlr,
         )
 
+        self.qf2_optimizer = optimizer_class(
+            self.qf2.parameters(),
+            lr=self.qlr,
+        )
+
+        self.embedding_optimizer = optimizer_class(
+            [self.embedding],
+            lr=self.plr,
+        )
 
 
         self.automatic_entropy_tuning = automatic_entropy_tuning
@@ -57,7 +75,7 @@ class ARPPO(OffRLAlgo):
                 [self.log_alpha],
                 lr=self.plr,
             )
-        self.sample_key = ["obs", "next_obs", "acts", "rewards", "terminals",  "task_idxs", "task_inputs"]
+        self.sample_key = ["obs", "next_obs", "acts", "rewards", "terminals",  "task_idxs", "task_inputs", "embeddings"]
         self.qf_criterion = nn.MSELoss()
 
         self.policy_std_reg_weight = policy_std_reg_weight
@@ -74,25 +92,26 @@ class ARPPO(OffRLAlgo):
             terminals = batch['terminals']
             task_inputs = batch["task_inputs"]
             task_idx    = batch['task_idxs']
+            embeddings = batch['embeddings']
 
             rewards   = torch.Tensor(rewards).to( self.device )
             terminals = torch.Tensor(terminals).to( self.device )
             obs       = torch.Tensor(obs).to( self.device )
             actions   = torch.Tensor(actions).to( self.device )
             next_obs  = torch.Tensor(next_obs).to( self.device )
-            task_inputs = torch.Tensor(task_inputs).to(self.device)
+            task_inputs = torch.Tensor(task_inputs).to(self.device).long()
             task_idx    = torch.Tensor(task_idx).to( self.device ).long()
+            embeddings = torch.Tensor(embeddings).to(self.device)
 
-            self.pf_state.train()
-            self.pf_task.train()
-            self.pf_action.train()
+            self.qf1.train()
+            self.qf2.train()
 
             """
             Policy operations.
             """
-            representation=self.pf_state.forward(obs)
-            embedding=self.pf_task.forward(task_inputs)
-            sample_info = self.pf_action.explore(representation, embedding, return_log_probs=True )
+            representations=self.pf_state.forward(obs)
+            # embedding=self.pf_task.forward(task_inputs)
+            sample_info = self.pf_action.explore(representations, embeddings, return_log_probs=True )
 
             mean        = sample_info["mean"]
             log_std     = sample_info["log_std"]
@@ -117,9 +136,9 @@ class ARPPO(OffRLAlgo):
                 alpha_loss = 0
 
             with torch.no_grad():
-                representation = self.pf_state.forward(next_obs)
+                representations = self.pf_state.forward(next_obs)
 
-                target_sample_info = self.pf_action.explore(representation, embedding, return_log_probs=True )
+                target_sample_info = self.pf_action.explore(representations, embeddings, return_log_probs=True )
 
                 target_actions   = target_sample_info["action"]
                 target_log_probs = target_sample_info["log_prob"]
@@ -128,7 +147,20 @@ class ARPPO(OffRLAlgo):
                 target_q2_pred = self.target_qf2([next_obs, target_actions,task_inputs])
                 min_target_q = torch.min(target_q1_pred, target_q2_pred)
                 target_v_values = min_target_q - alpha * target_log_probs
-            
+            """
+            QF Loss
+            """
+            q_target = rewards + (1. - terminals) * self.discount * target_v_values
+            qf1_loss = self.qf_criterion(q1_pred, q_target.detach())
+            qf2_loss = self.qf_criterion(q2_pred, q_target.detach())
+            assert q1_pred.shape == q_target.shape
+            assert q2_pred.shape == q_target.shape
+            # qf1_loss = (0.5 * ( q1_pred - q_target.detach() ) ** 2).mean()
+            # qf2_loss = (0.5 * ( q2_pred - q_target.detach() ) ** 2).mean()
+
+            q_new_actions = torch.min(
+                self.qf1([obs, new_actions,task_inputs]),
+                self.qf2([obs, new_actions,task_inputs]))
             """
             Policy Loss
             """
@@ -146,17 +178,13 @@ class ARPPO(OffRLAlgo):
             Update Networks
             """
 
-            self.pf_state_optimizer.zero_grad()
-            self.pf_task_optimizer.zero_grad()
-            self.pf_action_optimizer.zero_grad()
+            
+            self.embedding_optimizer.zero_grad()
             policy_loss.backward()
-            pf_state_norm = torch.nn.utils.clip_grad_norm_(self.pf_state.parameters(), 10)
-            pf_task_norm = torch.nn.utils.clip_grad_norm_(self.pf_task.parameters(), 10)
-            pf_action_norm = torch.nn.utils.clip_grad_norm_(self.pf_action.parameters(), 10)
+            embedding_norm = torch.nn.utils.clip_grad_norm_(self.pf_state.parameters(), 10)
+            
 
-            self.pf_action_optimizer.step()
-            self.pf_task_optimizer.step()
-            self.pf_state_optimizer.step()
+            self.embedding_optimizer.step()
 
             self.qf1_optimizer.zero_grad()
             qf1_loss.backward()
@@ -174,14 +202,17 @@ class ARPPO(OffRLAlgo):
             info = {}
             info['Reward_Mean'] = rewards.mean().item()
 
-
+            if self.automatic_entropy_tuning:
+                info["Alpha"] = alpha.item()
+                info["Alpha_loss"] = alpha_loss.item()
             info['Training/policy_loss'] = policy_loss.item()
+            info['Training/qf1_loss'] = qf1_loss.item()
+            info['Training/qf2_loss'] = qf2_loss.item()
 
-
-
-            info['Training/pf_task_norm'] = pf_task_norm.item()
- 
-
+            
+            info['Training/embedding_norm'] = embedding_norm.item()
+            info['Training/qf1_norm'] = qf1_norm.item()
+            info['Training/qf2_norm'] = qf2_norm.item()
 
             info['log_std/mean'] = log_std.mean().item()
             info['log_std/std'] = log_std.std().item()
@@ -205,12 +236,24 @@ class ARPPO(OffRLAlgo):
         return [
             self.pf_state,
             self.pf_action,
+            self.qf1,
+            self.qf2,
+            self.target_qf1,
+            self.target_qf2
         ]
         
     @property
     def snapshot_networks(self):
         return [
             ["pf_state", self.pf_state],
-            ["pf_action", self.pf_action]
+            ["pf_action", self.pf_action],
+            ["qf1", self.qf1],
+            ["qf2", self.qf2],
         ]
 
+    @property
+    def target_networks(self):
+        return [
+            ( self.qf1, self.target_qf1 ),
+            ( self.qf2, self.target_qf2 )
+        ]

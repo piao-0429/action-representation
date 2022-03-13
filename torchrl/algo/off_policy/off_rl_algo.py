@@ -66,10 +66,6 @@ class OffRLAlgo(RLAlgo):
             # print(training_epoch_info)
             for reward in training_epoch_info["train_rewards"]:
                 self.training_episode_rewards.append(reward)
-            #     print("reward is:      ")
-            #     print(reward)
-            # print("training_episode_rewards is:      ")
-            # print(self.training_episode_rewards)
             finish_epoch_info = self.finish_epoch()
 
             total_frames += self.collector.active_worker_nums * self.epoch_frames
